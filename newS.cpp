@@ -8,78 +8,95 @@
 #include <unistd.h>
 #include <iostream>
 #include <thread>
-#include <map>
+#include <list>
 
-std::map<int, std::string> clientMap;
+using namespace std;
 
-void readSocketThread(int cliSocket) {
-    char buffer[300];
-    do {
-        int n = read(cliSocket, buffer, 300);
+struct Cliente {
+    int socket;
+    string nombre;
+};
+
+list<Cliente> clientes;
+
+void manejadorCliente(int socketCliente) {
+    char buffer[256];
+    while (true) {
+        int n = read(socketCliente, buffer, 256);
         if (n <= 0) break;
-
-        std::string msg(buffer);
-        std::cout << "Mensaje recibido: " << msg << std::endl;
-
-        size_t colonPos = msg.find(':');
-        if (colonPos != std::string::npos) {
-            std::string recipients = msg.substr(0, colonPos);
-            std::string content = msg.substr(colonPos + 1);
-
-            for (auto& client : clientMap) {
-                if (recipients == "all" || recipients.find(client.second) != std::string::npos) {
-                    write(client.first, content.c_str(), content.size());
+        
+        buffer[n] = '\0';
+        string mensaje(buffer);
+        size_t separador = mensaje.find(':');
+        
+        if (separador != string::npos) {
+            string destino = mensaje.substr(0, separador);
+            string texto = mensaje.substr(separador + 1);
+            
+            for (auto& cliente : clientes) {
+                if (cliente.nombre == destino) {
+                    write(cliente.socket, texto.c_str(), texto.size());
+                    break;
                 }
             }
         }
-    } while (true);
-
-    close(cliSocket);
-    clientMap.erase(cliSocket);
+    }
+    
+    // Eliminar cliente desconectado
+    for (auto it = clientes.begin(); it != clientes.end(); ++it) {
+        if (it->socket == socketCliente) {
+            cout << "Cliente desconectado: " << it->nombre << endl;
+            clientes.erase(it);
+            break;
+        }
+    }
+    close(socketCliente);
 }
 
 int main() {
-    struct sockaddr_in stSockAddr;
-    int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-
-    if (-1 == SocketFD) {
-        perror("Cannot create socket");
-        exit(EXIT_FAILURE);
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket == -1) {
+        perror("Error al crear socket");
+        exit(1);
     }
 
-    memset(&stSockAddr, 0, sizeof(stSockAddr));
-    stSockAddr.sin_family = AF_INET;
-    stSockAddr.sin_port = htons(45000);
-    stSockAddr.sin_addr.s_addr = INADDR_ANY;
+    sockaddr_in direccion;
+    direccion.sin_family = AF_INET;
+    direccion.sin_port = htons(45000);
+    direccion.sin_addr.s_addr = INADDR_ANY;
 
-    if (-1 == bind(SocketFD, (struct sockaddr*)&stSockAddr, sizeof(stSockAddr))) {
-        perror("Bind failed");
-        close(SocketFD);
-        exit(EXIT_FAILURE);
+    if (bind(serverSocket, (sockaddr*)&direccion, sizeof(direccion)) {
+        perror("Error en bind");
+        exit(1);
     }
 
-    if (-1 == listen(SocketFD, 10)) {
-        perror("Listen failed");
-        close(SocketFD);
-        exit(EXIT_FAILURE);
+    if (listen(serverSocket, 10)) {
+        perror("Error en listen");
+        exit(1);
     }
+
+    cout << "Servidor iniciado. Esperando conexiones..." << endl;
 
     while (true) {
-        int ClientFD = accept(SocketFD, NULL, NULL);
-        if (ClientFD < 0) {
-            perror("Accept failed");
-            close(SocketFD);
-            exit(EXIT_FAILURE);
+        int socketCliente = accept(serverSocket, NULL, NULL);
+        if (socketCliente == -1) {
+            perror("Error en accept");
+            continue;
         }
 
-        char clientName[100];
-        read(ClientFD, clientName, 100);
-        clientMap[ClientFD] = clientName;
-        std::cout << "Nuevo cliente: " << clientName << std::endl;
+        char nombre[50];
+        int n = read(socketCliente, nombre, 50);
+        nombre[n] = '\0';
 
-        std::thread(readSocketThread, ClientFD).detach();
+        Cliente nuevo;
+        nuevo.socket = socketCliente;
+        nuevo.nombre = nombre;
+        clientes.push_back(nuevo);
+
+        cout << "Nuevo cliente conectado: " << nombre << endl;
+        thread(manejadorCliente, socketCliente).detach();
     }
 
-    close(SocketFD);
+    close(serverSocket);
     return 0;
 }
