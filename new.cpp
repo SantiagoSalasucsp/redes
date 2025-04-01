@@ -9,53 +9,59 @@
 #include <iostream>
 #include <thread>
 
-void readSocketThread(int cliSocket) {
-    char buffer[300];
-    do {
-        int n = read(cliSocket, buffer, 300);
-        if (n <= 0) break;
+using namespace std;
+
+void leerMensajes(int socket) {
+    char buffer[256];
+    while (true) {
+        int n = read(socket, buffer, 256);
+        if (n <= 0) {
+            cout << "Desconectado del servidor" << endl;
+            break;
+        }
         buffer[n] = '\0';
-        std::cout << "\nMensaje recibido: " << buffer << std::endl;
-    } while (true);
-    close(cliSocket);
+        cout << "Mensaje recibido: " << buffer << endl;
+    }
 }
 
 int main() {
-    struct sockaddr_in stSockAddr;
-    int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-
-    if (-1 == SocketFD) {
-        perror("Cannot create socket");
-        exit(EXIT_FAILURE);
+    int socketCliente = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketCliente == -1) {
+        perror("Error al crear socket");
+        exit(1);
     }
 
-    memset(&stSockAddr, 0, sizeof(stSockAddr));
-    stSockAddr.sin_family = AF_INET;
-    stSockAddr.sin_port = htons(45000);
-    inet_pton(AF_INET, "127.0.0.1", &stSockAddr.sin_addr);
+    sockaddr_in direccion;
+    direccion.sin_family = AF_INET;
+    direccion.sin_port = htons(45000);
+    inet_pton(AF_INET, "127.0.0.1", &direccion.sin_addr);
 
-    if (-1 == connect(SocketFD, (struct sockaddr*)&stSockAddr, sizeof(stSockAddr))) {
-        perror("Connect failed");
-        close(SocketFD);
-        exit(EXIT_FAILURE);
+    if (connect(socketCliente, (sockaddr*)&direccion, sizeof(direccion))) {
+        perror("Error al conectar");
+        exit(1);
     }
 
-    std::cout << "Ingresa tu nombre: ";
-    std::string name;
-    std::getline(std::cin, name);
-    write(SocketFD, name.c_str(), name.size() + 1);
+    cout << "Ingresa tu nombre: ";
+    char nombre[50];
+    cin >> nombre;
+    write(socketCliente, nombre, strlen(nombre));
 
-    std::thread(readSocketThread, SocketFD).detach();
+    thread(leerMensajes, socketCliente).detach();
 
+    char buffer[256];
     while (true) {
-        std::cout << "Ingrese mensaje (destinatario1,destinatario2:mensaje): ";
-        std::string msg;
-        std::getline(std::cin, msg);
+        cout << "Destinatario: ";
+        char destinatario[50];
+        cin >> destinatario;
 
-        if (msg == "exit") break;
-        write(SocketFD, msg.c_str(), msg.size() + 1);
+        cout << "Mensaje: ";
+        char mensaje[200];
+        cin >> mensaje;
+
+        sprintf(buffer, "%s:%s", destinatario, mensaje);
+        write(socketCliente, buffer, strlen(buffer));
     }
 
-    close(SocketFD);
+    close(socketCliente);
     return 0;
 }
