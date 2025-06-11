@@ -1,0 +1,294 @@
+// FUNCIÓN PARA ENVIAR ARCHIVO - CLIENTE
+void enviarArchivoUDP(int sock, const sockaddr_in& serverAddr, const string& destino, const string& rutaArchivo) {
+    // Extraer nombre del archivo
+    string nombreArchivo;
+    size_t posBarra = rutaArchivo.find_last_of("/\\");
+    if (posBarra != string::npos) {
+        nombreArchivo = rutaArchivo.substr(posBarra + 1);
+    } else {
+        nombreArchivo = rutaArchivo;
+    }
+
+    // Leer archivo
+    ifstream archivoEntrada(rutaArchivo, ios::in | ios::binary);
+    if (!archivoEntrada.is_open()) {
+        cerr << "No se pudo abrir el archivo " << rutaArchivo << "\n";
+        return;
+    }
+    
+    vector<char> datosArchivo((istreambuf_iterator<char>(archivoEntrada)),
+                 istreambuf_iterator<char>());
+    long tamanoArchivo = datosArchivo.size();
+    archivoEntrada.close();
+
+    cout << "Enviando archivo: " << nombreArchivo << " (" << tamanoArchivo << " bytes)" << endl;
+
+    // Calcular hash
+    int valorHash = calcularHash(datosArchivo.data(), tamanoArchivo);
+    string hashStr = to5Digits(valorHash);
+
+    // Crear mensaje con formato correcto
+    string mensaje = "F" + 
+                    ceros_int(2, destino.size()) + destino +           // Tamaño destinatario (2 dígitos) + destinatario
+                    ceros_int(3, nombreArchivo.size()) + nombreArchivo + // Tamaño nombre archivo (3 dígitos) + nombre
+                    ceros_int(8, tamanoArchivo) +                      // Tamaño archivo (8 dígitos)
+                    string(datosArchivo.data(), datosArchivo.size()) + // Contenido archivo
+                    hashStr;                                           // Hash (5 dígitos)
+
+    cout << "Tamaño total del mensaje: " << mensaje.size() << " bytes" << endl;
+    
+    // Enviar mensaje
+    enviarMensaje(sock, serverAddr, mensaje);
+    cout << "Archivo enviado correctamente." << endl;
+}
+
+// FUNCIÓN PARA PROCESAR COMANDO DE ARCHIVO EN processMessage - CLIENTE
+// Reemplaza el caso 'f' en processMessage con esto:
+else if (message.size() >= 2 && message[0] == 'f' && message[1] == ' ') {
+    size_t firstSpace = message.find(' ', 2);
+    if (firstSpace == string::npos) {
+        cerr << "Formato: f destinatario ruta_archivo\n";
+        return "";
+    }
+    string destinatario = message.substr(2, firstSpace - 2);
+    string filePath = message.substr(firstSpace + 1);
+    
+    // Usar el socket actual en lugar de crear uno nuevo
+    extern int sock;
+    extern sockaddr_in serverAddr;
+    enviarArchivoUDP(sock, serverAddr, destinatario, filePath);
+    return "";
+}
+
+// FUNCIÓN PARA RECIBIR ARCHIVO - CLIENTE (en receiveMessages)
+// Reemplaza el caso 'F' en receiveMessages con esto:
+case 'F': {
+    cout << "Procesando archivo recibido..." << endl;
+    
+    int idx = 0;
+    
+    // Leer tamaño del remitente (2 dígitos)
+    if (contenido.size() < 2) {
+        cerr << "Error: Mensaje de archivo demasiado corto" << endl;
+        break;
+    }
+    int sizeSender = stoi(contenido.substr(idx, 2));
+    idx += 2;
+    
+    // Leer remitente
+    if (contenido.size() < idx + sizeSender) {
+        cerr << "Error: No se puede leer el remitente" << endl;
+        break;
+    }
+    string sender = contenido.substr(idx, sizeSender);
+    idx += sizeSender;
+    
+    // Leer tamaño del nombre del archivo (3 dígitos)
+    if (contenido.size() < idx + 3) {
+        cerr << "Error: No se puede leer tamaño del nombre" << endl;
+        break;
+    }
+    int sizeFileName = stoi(contenido.substr(idx, 3));
+    idx += 3;
+    
+    // Leer nombre del archivo
+    if (contenido.size() < idx + sizeFileName) {
+        cerr << "Error: No se puede leer el nombre del archivo" << endl;
+        break;
+    }
+    string fileName = contenido.substr(idx, sizeFileName);
+    idx += sizeFileName;
+    
+    // Leer tamaño del archivo (8 dígitos)
+    if (contenido.size() < idx + 8) {
+        cerr << "Error: No se puede leer tamaño del archivo" << endl;
+        break;
+    }
+    int sizeFile = stoi(contenido.substr(idx, 8));
+    idx += 8;
+    
+    // Leer contenido del archivo
+    if (contenido.size() < idx + sizeFile) {
+        cerr << "Error: Contenido del archivo incompleto" << endl;
+        break;
+    }
+    string fileContent = contenido.substr(idx, sizeFile);
+    idx += sizeFile;
+    
+    // Leer hash (5 dígitos)
+    if (contenido.size() < idx + 5) {
+        cerr << "Error: No se puede leer el hash" << endl;
+        break;
+    }
+    string hash = contenido.substr(idx, 5);
+
+    cout << "Archivo recibido de: " << sender << endl;
+    cout << "Nombre: " << fileName << endl;
+    cout << "Tamaño: " << sizeFile << " bytes" << endl;
+
+    // Verificar hash
+    int calculatedHash = calcularHash(fileContent.data(), fileContent.size());
+    if (to5Digits(calculatedHash) == hash) {
+        // Crear nombre único para el archivo recibido
+        size_t dotPos = fileName.find_last_of('.');
+        string newFileName;
+        if (dotPos != string::npos) {
+            newFileName = fileName.substr(0, dotPos) + "_recibido_de_" + sender + fileName.substr(dotPos);
+        } else {
+            newFileName = fileName + "_recibido_de_" + sender;
+        }
+        
+        // Guardar archivo
+        ofstream outFile(newFileName, ios::binary);
+        if (outFile.is_open()) {
+            outFile.write(fileContent.data(), fileContent.size());
+            outFile.close();
+            cout << "✓ Archivo guardado como: " << newFileName << " (hash verificado)" << endl;
+        } else {
+            cerr << "Error: No se pudo guardar el archivo" << endl;
+        }
+    } else {
+        cerr << "Error: Hash no coincide para el archivo " << fileName << endl;
+        cerr << "Hash esperado: " << hash << ", calculado: " << to5Digits(calculatedHash) << endl;
+    }
+    break;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// FUNCIÓN PARA PROCESAR COMANDO DE ARCHIVO - SERVIDOR
+// Reemplaza el caso 'F' en procesarComando con esto:
+case 'F': {
+    cout << "Procesando archivo recibido de " << clientName << endl;
+    
+    int idx = 0;
+    
+    // Leer tamaño del destinatario (2 dígitos)
+    if (contenido.size() < 2) {
+        cout << "Error: Mensaje de archivo demasiado corto" << endl;
+        break;
+    }
+    int destSize = stoi(contenido.substr(idx, 2));
+    idx += 2;
+    
+    // Leer destinatario
+    if (contenido.size() < idx + destSize) {
+        cout << "Error: No se puede leer el destinatario" << endl;
+        break;
+    }
+    string destinatario = contenido.substr(idx, destSize);
+    idx += destSize;
+    
+    // Leer tamaño del nombre del archivo (3 dígitos)
+    if (contenido.size() < idx + 3) {
+        cout << "Error: No se puede leer tamaño del nombre del archivo" << endl;
+        break;
+    }
+    int nameSize = stoi(contenido.substr(idx, 3));
+    idx += 3;
+    
+    // Leer nombre del archivo
+    if (contenido.size() < idx + nameSize) {
+        cout << "Error: No se puede leer el nombre del archivo" << endl;
+        break;
+    }
+    string fileName = contenido.substr(idx, nameSize);
+    idx += nameSize;
+    
+    // Leer tamaño del archivo (8 dígitos)
+    if (contenido.size() < idx + 8) {
+        cout << "Error: No se puede leer tamaño del archivo" << endl;
+        break;
+    }
+    int fileSize = stoi(contenido.substr(idx, 8));
+    idx += 8;
+    
+    // Leer contenido del archivo
+    if (contenido.size() < idx + fileSize) {
+        cout << "Error: Contenido del archivo incompleto. Esperado: " << fileSize 
+             << ", disponible: " << (contenido.size() - idx) << endl;
+        break;
+    }
+    string fileContent = contenido.substr(idx, fileSize);
+    idx += fileSize;
+    
+    // Leer hash (5 dígitos)
+    if (contenido.size() < idx + 5) {
+        cout << "Error: No se puede leer el hash" << endl;
+        break;
+    }
+    string hash = contenido.substr(idx, 5);
+
+    cout << "Detalles del archivo:" << endl;
+    cout << "- Remitente: " << clientName << endl;
+    cout << "- Destinatario: " << destinatario << endl;
+    cout << "- Nombre: " << fileName << endl;
+    cout << "- Tamaño: " << fileSize << " bytes" << endl;
+    cout << "- Hash: " << hash << endl;
+
+    // Verificar si el destinatario existe
+    if (clientesUDP.find(destinatario) != clientesUDP.end()) {
+        // Crear mensaje para reenviar al destinatario
+        string msg = "F" + 
+                    ceros_int(2, clientName.size()) + clientName +      // Tamaño remitente (2 dígitos) + remitente
+                    ceros_int(3, fileName.size()) + fileName +          // Tamaño nombre archivo (3 dígitos) + nombre
+                    ceros_int(8, fileSize) +                           // Tamaño archivo (8 dígitos)
+                    fileContent +                                      // Contenido archivo
+                    hash;                                              // Hash (5 dígitos)
+        
+        cout << "Reenviando archivo de " << clientName << " a " << destinatario << endl;
+        cout << "Tamaño del mensaje completo: " << msg.size() << " bytes" << endl;
+        
+        sendPaquete(sock, clientesUDP[destinatario], msg);
+        cout << "✓ Archivo reenviado correctamente" << endl;
+    }
+    else {
+        string error = "E" + ceros(2, "Usuario no encontrado") + "Usuario no encontrado";
+        sendPaquete(sock, clientAddr, error);
+        cout << "✗ Usuario destinatario " << destinatario << " no encontrado" << endl;
+    }
+    break;
+}
+
+// FUNCIÓN AUXILIAR PARA CALCULAR HASH (agregar al servidor si no existe)
+int calcularHash(const char* data, size_t length) {
+    int hash = 0;
+    for (size_t i = 0; i < length; ++i) {
+        hash = (hash + (unsigned char)data[i]) % 100000;
+    }
+    return hash;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+int sock; // Socket global
+sockaddr_in serverAddr; // Dirección del servidor global
+
