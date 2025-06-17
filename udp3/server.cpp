@@ -16,8 +16,6 @@
 #include <unordered_map>
 #include <mutex>
 #include <algorithm>
-#include <chrono> // Para std::chrono::milliseconds
-#include <thread> // Para std::this_thread::sleep_for
 
 using namespace std;
 
@@ -54,32 +52,15 @@ void finalizarPartida(char resultado);
 bool ganador(char s);
 bool tableroLleno();
 
-// Nueva función para enviar ACK de archivo
-void enviarACKArchivo(int sock, char resultado, const string& mensaje) {
-    char buffer[500];
-    memset(buffer, '#', 500);
-    string res_msg = string(1, resultado) + mensaje;
-    int totalSize = 1 + res_msg.length(); // 'A' + resultado + mensaje
-    
-    // Formato: 0000100001 (seq/tot) + 000xx (len) + 'A' (tipo) + 'S'/'F' (resultado) + mensaje
-    sprintf(buffer, "0000100001%05dA%s", totalSize, res_msg.c_str());
-    write(sock, buffer, 500);
-    this_thread::sleep_for(chrono::milliseconds(50));
-}
-
-
 void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, char tipo) {
     char buffer[500];
-
-    // Offset para el tipo de mensaje y datos cambia de 11 a 15 debido a 5 dígitos para seq y tot
-    const int PROTOCOL_HEADER_LEN = 15; // 5 (seq) + 5 (tot) + 5 (len) + 1 (tipo)
 
     if (tipo == 'L') {
         string mensaje;
         string coma = "";
         
         {
-            lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+            lock_guard<mutex> lock(mapaMutex);
             for (auto &par : mapaSockets) {
                 if (par.first != nick) {
                     mensaje += coma + par.first;
@@ -88,8 +69,7 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
             }
         }
 
-        // Se usa 500 - (5 para seq + 5 para tot + 5 para len + 1 para tipo)
-        int sizeFijo = 16; 
+        int sizeFijo = 10;
         int tamMax = 500 - sizeFijo;
 
         if (mensaje.length() > tamMax) {
@@ -98,40 +78,37 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
             int totalPkg = piezas.size();
             for (auto &trozo : piezas) {
                 memset(buffer, '#', 500);
-                sprintf(buffer, "%05d%05d%05dl%s",
+                sprintf(buffer, "%02d%02d%05dl%s",
                        (seq == totalPkg ? 0 : seq), totalPkg,
                        (int)trozo.length() + 1, trozo.c_str());
                 write(sock, buffer, 500);
-                this_thread::sleep_for(chrono::milliseconds(50));
                 seq++;
             }
         } else {
             memset(buffer, '#', 500);
-            sprintf(buffer, "0000100001%05dl%s", (int)mensaje.length() + 1, mensaje.c_str());
+            sprintf(buffer, "0001%05dl%s", (int)mensaje.length() + 1, mensaje.c_str());
             write(sock, buffer, 500);
-            this_thread::sleep_for(chrono::milliseconds(50));
         }
     }
     else if (tipo == 'M') {
-        // La lectura del paquete entrante también debe ajustarse al nuevo offset
-        int tamMsgHeader = stoi(pkgs[0].substr(PROTOCOL_HEADER_LEN, 5));
-        int tamDest = stoi(pkgs[0].substr(PROTOCOL_HEADER_LEN + 5 + tamMsgHeader, 5));
-        string destino = pkgs[0].substr(PROTOCOL_HEADER_LEN + 5 + tamMsgHeader + 5, tamDest);
+        int tamMsgHeader = stoi(pkgs[0].substr(10, 5));
+        int tamDest = stoi(pkgs[0].substr(15 + tamMsgHeader, 5));
+        string destino = pkgs[0].substr(15 + tamMsgHeader + 5, tamDest);
 
         string mensaje;
         for (size_t i = 0; i < pkgs.size(); ++i) {
             if (i == 0) {
-                int t = stoi(pkgs[i].substr(PROTOCOL_HEADER_LEN, 5));
-                mensaje += pkgs[i].substr(PROTOCOL_HEADER_LEN + 5, t);
+                int t = stoi(pkgs[i].substr(10, 5));
+                mensaje += pkgs[i].substr(15, t);
             } else {
-                mensaje += pkgs[i].substr(PROTOCOL_HEADER_LEN);
+                mensaje += pkgs[i].substr(10);
             }
         }
 
-        lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+        lock_guard<mutex> lock(mapaMutex);
         if (mapaSockets.find(destino) != mapaSockets.end()) {
-            int sizeFijo = 1 + 5 + 5 + nick.length(); // Tipo + TamMsg + TamRem
-            int tamMaxPayload = 500 - (PROTOCOL_HEADER_LEN + sizeFijo -1); // -1 por el caracter de tipo que ya está contado
+            int sizeFijo = 1 + 5 + 5 + nick.length();
+            int tamMaxPayload = 500 - (10 + sizeFijo);
             
             vector<string> piezas = (mensaje.length() > tamMaxPayload) ? 
                 partir(mensaje, tamMaxPayload) : vector<string>{mensaje};
@@ -141,10 +118,10 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
 
             for (auto &trozo : piezas) {
                 memset(buffer, '#', 500);
-                sprintf(buffer, "%05d%05d", (seq == totalPkg ? 0 : seq), totalPkg); // 5 dígitos para seq y tot
+                sprintf(buffer, "%02d%02d", (seq == totalPkg ? 0 : seq), totalPkg);
                 int totalSize = 1 + 5 + (int)trozo.length() + 5 + (int)nick.length();
 
-                int offset = 10; // Offset para len y tipo
+                int offset = 4;
                 sprintf(buffer + offset, "%05d", totalSize);
                 offset += 5;
                 buffer[offset++] = 'm';
@@ -159,7 +136,6 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
                 memcpy(buffer + offset, nick.c_str(), nick.length());
 
                 write(mapaSockets[destino], buffer, 500);
-                this_thread::sleep_for(chrono::milliseconds(50));
                 seq++;
             }
         } else {
@@ -169,16 +145,11 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
     else if (tipo == 'B') {
         string mensaje;
         for (size_t i = 0; i < pkgs.size(); ++i) {
-             if (i == 0) {
-                int t = stoi(pkgs[i].substr(PROTOCOL_HEADER_LEN, 5));
-                mensaje += pkgs[i].substr(PROTOCOL_HEADER_LEN + 5, t);
-            } else {
-                mensaje += pkgs[i].substr(PROTOCOL_HEADER_LEN);
-            }
+             mensaje += pkgs[i].substr(10);
         }
 
         int sizeFijo = 1 + 5 + 5 + nick.length();
-        int tamMaxPayload = 500 - (PROTOCOL_HEADER_LEN + sizeFijo -1); // -1 por el caracter de tipo que ya está contado
+        int tamMaxPayload = 500 - (10 + sizeFijo);
 
         vector<string> piezas = (mensaje.length() > tamMaxPayload) ? 
             partir(mensaje, tamMaxPayload) : vector<string>{mensaje};
@@ -188,10 +159,10 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
 
         for (auto &trozo : piezas) {
             memset(buffer, '#', 500);
-            sprintf(buffer, "%05d%05d", (seq == totalPkg ? 0 : seq), totalPkg); // 5 dígitos para seq y tot
+            sprintf(buffer, "%02d%02d", (seq == totalPkg ? 0 : seq), totalPkg);
             int totalSize = 1 + 5 + (int)trozo.length() + 5 + (int)nick.length();
 
-            int offset = 10; // Offset para len y tipo
+            int offset = 4;
             sprintf(buffer + offset, "%05d", totalSize);
             offset += 5;
             buffer[offset++] = 'b';
@@ -205,28 +176,26 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
             offset += 5;
             memcpy(buffer + offset, nick.c_str(), nick.length());
 
-            lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+            lock_guard<mutex> lock(mapaMutex);
             for (auto &par : mapaSockets) {
                 if (par.first != nick) {
                     write(par.second, buffer, 500);
-                    this_thread::sleep_for(chrono::milliseconds(50));
                 }
             }
             seq++;
         }
     }
     else if (tipo == 'F') {
-        // La lectura del paquete entrante también debe ajustarse al nuevo offset
-        int tamRemitente = stoi(pkgs[0].substr(PROTOCOL_HEADER_LEN, 5));
-        string remitente = pkgs[0].substr(PROTOCOL_HEADER_LEN + 5, tamRemitente);
-        int tamFileName = stoi(pkgs[0].substr(PROTOCOL_HEADER_LEN + 5 + tamRemitente, 100)); // Usar 100 para tamaño del nombre
-        string fileName = pkgs[0].substr(PROTOCOL_HEADER_LEN + 5 + tamRemitente + 100, tamFileName);
+        int tamDest = stoi(pkgs[0].substr(10, 5));
+        string destino = pkgs[0].substr(15, tamDest);
+        int tamFileName = stoi(pkgs[0].substr(15 + tamDest, 100));
+        string fileName = pkgs[0].substr(15 + tamDest + 100, tamFileName);
         
-        size_t posLenPrimerTrozo = PROTOCOL_HEADER_LEN + 5 + tamRemitente + 100 + tamFileName;
-        long lenPrimerTrozoActual = stol(pkgs[0].substr(posLenPrimerTrozo, 18));
-        size_t posDatosPrimerPaquete = posLenPrimerTrozo + 18;
-        string hashStr = pkgs[0].substr(posDatosPrimerPaquete + lenPrimerTrozoActual, 5);
-        int hash = stoi(hashStr);
+        long tamFileTotalEnHeader = stol(pkgs[0].substr(15 + tamDest + 100 + tamFileName, 18));
+        
+        size_t posDatosPrimerPaquete = 15 + tamDest + 100 + tamFileName + 18;
+        long lenPrimerTrozoActual = stol(pkgs[0].substr(posDatosPrimerPaquete - 18, 18));
+        string hash = pkgs[0].substr(posDatosPrimerPaquete + lenPrimerTrozoActual, 5);
 
         string archivo;
         
@@ -234,22 +203,20 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
             if (i == 0) {
                 archivo += pkgs[i].substr(posDatosPrimerPaquete, lenPrimerTrozoActual);
             } else {
-                size_t posLenTrozoSubPaquete = PROTOCOL_HEADER_LEN; // El offset para subsiguientes
+                size_t posLenTrozoSubPaquete = 10;
                 long lenActualTrozo = stol(pkgs[i].substr(posLenTrozoSubPaquete, 18));
                 size_t posDatosSubPaquete = posLenTrozoSubPaquete + 18;
                 archivo += pkgs[i].substr(posDatosSubPaquete, lenActualTrozo);
             }
         }
         
-        lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
-        if (mapaSockets.find(nick) != mapaSockets.end()) { // 'nick' es el destino en este contexto, ya que lo recibió
-            cout << "Servidor: Reenviando archivo '" << fileName << "' de '" << remitente << "' a '" << nick << "'." << endl;
-
-            int headerPrimerFragmentoReenvio = 1 + 5 + remitente.length() + 100 + fileName.length() + 18 + 5;
-            int tamMaxPrimerFragmentoReenvio = 500 - (PROTOCOL_HEADER_LEN + headerPrimerFragmentoReenvio -1);
+        lock_guard<mutex> lock(mapaMutex);
+        if (mapaSockets.find(destino) != mapaSockets.end()) {
+            int headerPrimerFragmentoReenvio = 1 + 5 + nick.length() + 100 + fileName.length() + 18 + 5;
+            int tamMaxPrimerFragmentoReenvio = 500 - (10 + headerPrimerFragmentoReenvio);
 
             int headerSubFragmentoReenvio = 1 + 18 + 5;
-            int tamMaxSubFragmentoReenvio = 500 - (PROTOCOL_HEADER_LEN + headerSubFragmentoReenvio -1);
+            int tamMaxSubFragmentoReenvio = 500 - (10 + headerSubFragmentoReenvio);
 
             std::vector<std::string> piezas_archivo_para_reenvio;
             if (archivo.length() > tamMaxPrimerFragmentoReenvio) {
@@ -263,27 +230,26 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
             }
             
             int totalPkg = piezas_archivo_para_reenvio.size();
-            int seqReenvio = 1;
+            int seq = 1;
 
-            bool reenvioExitoso = true;
             for (auto &trozo : piezas_archivo_para_reenvio) {
                 memset(buffer, '#', 500);
-                sprintf(buffer, "%05d%05d", (seqReenvio == totalPkg ? 0 : seqReenvio), totalPkg); // 5 dígitos para seq y tot
+                sprintf(buffer, "%02d%02d", (seq == totalPkg ? 0 : seq), totalPkg);
                 
                 int totalSize;
-                int offset = 10; // Offset para len y tipo
+                int offset = 4;
                 
-                if (seqReenvio == 1) {
-                    totalSize = 1 + 5 + (int)remitente.length() + 100 + (int)fileName.length() +
+                if (seq == 1) {
+                    totalSize = 1 + 5 + (int)nick.length() + 100 + (int)fileName.length() +
                                 18 + (int)trozo.length() + 5;
                     sprintf(buffer + offset, "%05d", totalSize);
                     offset += 5;
-                    buffer[offset++] = 'f'; // Tipo 'f' para archivo
+                    buffer[offset++] = 'f';
                     
-                    sprintf(buffer + offset, "%05d", (int)remitente.length());
+                    sprintf(buffer + offset, "%05d", (int)nick.length());
                     offset += 5;
-                    memcpy(buffer + offset, remitente.c_str(), remitente.length());
-                    offset += remitente.length();
+                    memcpy(buffer + offset, nick.c_str(), nick.length());
+                    offset += nick.length();
 
                     sprintf(buffer + offset, "%0100d", (int)fileName.length());
                     offset += 100;
@@ -295,45 +261,30 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
                     memcpy(buffer + offset, trozo.c_str(), trozo.length());
                     offset += trozo.length();
 
-                    sprintf(buffer + offset, "%05d", hash); // Hash como 5 dígitos
+                    memcpy(buffer + offset, hash.c_str(), 5);
                 } else {
                     totalSize = 1 + 18 + (int)trozo.length() + 5;
                     sprintf(buffer + offset, "%05d", totalSize);
                     offset += 5;
-                    buffer[offset++] = 'f'; // Tipo 'f' para archivo
+                    buffer[offset++] = 'f';
 
                     sprintf(buffer + offset, "%018ld", trozo.length());
                     offset += 18;
                     memcpy(buffer + offset, trozo.c_str(), trozo.length());
                     offset += trozo.length();
 
-                    sprintf(buffer + offset, "%05d", hash); // Hash como 5 dígitos
+                    memcpy(buffer + offset, hash.c_str(), 5);
                 }
-                if (write(mapaSockets[nick], buffer, 500) < 0) {
-                    perror("write error durante reenvio de archivo");
-                    reenvioExitoso = false;
-                    break;
-                }
-                this_thread::sleep_for(chrono::milliseconds(50));
-                seqReenvio++;
+                write(mapaSockets[destino], buffer, 500);
+                seq++;
             }
-
-            if (reenvioExitoso) {
-                cout << "Servidor: Archivo '" << fileName << "' reenviado exitosamente a '" << nick << "'." << endl;
-                enviarACKArchivo(sock, 'S', "Archivo '" + fileName + "' enviado exitosamente a '" + nick + "'.");
-            } else {
-                cerr << "Servidor: Fallo al reenviar archivo '" << fileName << "' a '" << nick << "'." << endl;
-                enviarACKArchivo(sock, 'F', "Fallo al enviar archivo '" + fileName + "' a '" + nick + "'.");
-            }
-
         } else {
-            cerr << "Servidor: Destino '" << nick << "' no encontrado para reenviar archivo." << endl;
-            enviarACKArchivo(sock, 'F', "Error: Destino '" + nick + "' no encontrado."); // 'sock' es el del remitente original
+            enviarM(sock, "Error: Destino no encontrado para enviar archivo.");
         }
     }
     else if (tipo == 'Q') {
         printf("\nEl cliente %s ha salido del chat\n", nick.c_str());
-        lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+        lock_guard<mutex> lock(mapaMutex);
         mapaSockets.erase(nick);
         return;
     }
@@ -364,35 +315,33 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
             partida.espectadores.push_back(nick);
             char pkt[500];
             memset(pkt, '#', 500);
-            memcpy(pkt, "0000100001", 10); // Ajuste a 5 dígitos para seq y tot
-            memcpy(pkt + 10, "00010", 5);
-            pkt[15] = 'X'; // Ajuste del offset para el tipo
-            memcpy(pkt + 16, partida.tablero, 9); // Ajuste del offset para los datos
+            memcpy(pkt, "0001", 4);
+            memcpy(pkt + 4, "00010", 5);
+            pkt[9] = 'X';
+            memcpy(pkt + 10, partida.tablero, 9);
             write(sock, pkt, 500);
-            this_thread::sleep_for(chrono::milliseconds(50));
         } else {
             enviarM(sock, "La partida no esta activa para ver.");
         }
     }
     else if (tipo == 'P') {
-        char pos = pkgs[0][PROTOCOL_HEADER_LEN]; // Ajuste del offset
-        char simb = pkgs[0][PROTOCOL_HEADER_LEN + 1]; // Ajuste del offset
+        char pos = pkgs[0][10];
+        char simb = pkgs[0][11];
 
         lock_guard<mutex> lock(partidaMutex);
         if (!((nick == partida.jugadorO && simb == 'O' && partida.turno == 'O') ||
               (nick == partida.jugadorX && simb == 'X' && partida.turno == 'X'))) {
             char errPkt[500];
             memset(errPkt, '#', 500);
-            memcpy(errPkt, "0000100001", 10); // Ajuste a 5 dígitos para seq y tot
-            memcpy(errPkt + 10, "00021", 5); // Offset ajustado
-            int off = 15; // Offset ajustado
+            memcpy(errPkt, "0001", 4);
+            memcpy(errPkt + 4, "00021", 5);
+            int off = 9;
             errPkt[off++] = 'E';
             errPkt[off++] = '7';
             memcpy(errPkt + off, "00014", 5);
             off += 5;
             memcpy(errPkt + off, "No es tu turno", 14);
             write(sock, errPkt, 500);
-            this_thread::sleep_for(chrono::milliseconds(50));
             return;
         }
 
@@ -400,16 +349,15 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
         if (idx < 0 || idx > 8 || partida.tablero[idx] != '_') {
             char errPkt[500];
             memset(errPkt, '#', 500);
-            memcpy(errPkt, "0000100001", 10); // Ajuste a 5 dígitos para seq y tot
-            memcpy(errPkt + 10, "00024", 5); // Offset ajustado
-            int off = 15; // Offset ajustado
+            memcpy(errPkt, "0001", 4);
+            memcpy(errPkt + 4, "00024", 5);
+            int off = 9;
             errPkt[off++] = 'E';
             errPkt[off++] = '6';
             memcpy(errPkt + off, "00016", 5);
             off += 5;
             memcpy(errPkt + off, "Posicion ocupada", 16);
             write(sock, errPkt, 500);
-            this_thread::sleep_for(chrono::milliseconds(50));
             return;
         }
 
@@ -417,7 +365,7 @@ void procesarMensaje(int sock, const string &nick, const vector<string> &pkgs, c
 
         if (ganador(simb)) {
             enviarX_aTodos();
-            this_thread::sleep_for(chrono::milliseconds(50));
+            sleep(1);
             finalizarPartida(simb);
         }
         else if (tableroLleno()) {
@@ -441,9 +389,9 @@ void enviarM(int sock, const string &msg) {
 
     char buffer[500];
     memset(buffer, '#', 500);
-    memcpy(buffer, "0000100001", 10); // 5 dígitos para seq y tot
-    sprintf(buffer + 10, "%05d", tamTot); // Offset ajustado
-    int off = 15; // Offset ajustado
+    memcpy(buffer, "0001", 4);
+    sprintf(buffer + 4, "%05d", tamTot);
+    int off = 9;
     buffer[off++] = 'm';
     sprintf(buffer + off, "%05d", lenMsg);
     off += 5;
@@ -453,18 +401,17 @@ void enviarM(int sock, const string &msg) {
     off += 5;
     memcpy(buffer + off, remitente.c_str(), lenRem);
     write(sock, buffer, 500);
-    this_thread::sleep_for(chrono::milliseconds(50));
 }
 
 void enviarX_aTodos() {
     char pkt[500];
     memset(pkt, '#', 500);
-    memcpy(pkt, "0000100001", 10); // 5 dígitos para seq y tot
-    memcpy(pkt + 10, "00010", 5); // Offset ajustado
-    pkt[15] = 'X'; // Offset ajustado
-    memcpy(pkt + 16, partida.tablero, 9); // Offset ajustado
+    memcpy(pkt, "0001", 4);
+    memcpy(pkt + 4, "00010", 5);
+    pkt[9] = 'X';
+    memcpy(pkt + 10, partida.tablero, 9);
 
-    lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+    lock_guard<mutex> lock(mapaMutex);
     if (!partida.jugadorO.empty() && mapaSockets.count(partida.jugadorO))
         write(mapaSockets[partida.jugadorO], pkt, 500);
     if (!partida.jugadorX.empty() && mapaSockets.count(partida.jugadorX))
@@ -472,20 +419,18 @@ void enviarX_aTodos() {
     for (auto &esp : partida.espectadores)
         if (mapaSockets.count(esp))
             write(mapaSockets[esp], pkt, 500);
-    this_thread::sleep_for(chrono::milliseconds(50));
 }
 
 void enviarT(const string &nick, char simbolo) {
     char pkt[500];
     memset(pkt, '#', 500);
-    memcpy(pkt, "0000100001", 10); // 5 dígitos para seq y tot
-    memcpy(pkt + 10, "00002", 5); // Offset ajustado
-    pkt[15] = 'T'; // Offset ajustado
-    pkt[16] = simbolo; // Offset ajustado
-    lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+    memcpy(pkt, "0001", 4);
+    memcpy(pkt + 4, "00002", 5);
+    pkt[9] = 'T';
+    pkt[10] = simbolo;
+    lock_guard<mutex> lock(mapaMutex);
     if (mapaSockets.count(nick))
         write(mapaSockets[nick], pkt, 500);
-    this_thread::sleep_for(chrono::milliseconds(50));
 }
 
 bool linea(int a, int b, int c, char s) {
@@ -508,24 +453,24 @@ void finalizarPartida(char resultado) {
     char pktO[500], pktX[500], pktE[500];
     
     memset(pktO, '#', 500);
-    memcpy(pktO, "0000100001", 10); // 5 dígitos para seq y tot
-    memcpy(pktO + 10, "00002", 5); // Offset ajustado
-    pktO[15] = 'O'; // Offset ajustado
-    pktO[16] = (resultado == 'O') ? 'W' : (resultado == 'X') ? 'L' : 'E'; // Offset ajustado
+    memcpy(pktO, "0001", 4);
+    memcpy(pktO + 4, "00002", 5);
+    pktO[9] = 'O';
+    pktO[10] = (resultado == 'O') ? 'W' : (resultado == 'X') ? 'L' : 'E';
     
     memset(pktX, '#', 500);
-    memcpy(pktX, "0000100001", 10); // 5 dígitos para seq y tot
-    memcpy(pktX + 10, "00002", 5); // Offset ajustado
-    pktX[15] = 'O'; // Offset ajustado
-    pktX[16] = (resultado == 'X') ? 'W' : (resultado == 'O') ? 'L' : 'E'; // Offset ajustado
+    memcpy(pktX, "0001", 4);
+    memcpy(pktX + 4, "00002", 5);
+    pktX[9] = 'O';
+    pktX[10] = (resultado == 'X') ? 'W' : (resultado == 'O') ? 'L' : 'E';
     
     memset(pktE, '#', 500);
-    memcpy(pktE, "0000100001", 10); // 5 dígitos para seq y tot
-    memcpy(pktE + 10, "00002", 5); // Offset ajustado
-    pktE[15] = 'O'; // Offset ajustado
-    pktE[16] = 'E'; // Offset ajustado
+    memcpy(pktE, "0001", 4);
+    memcpy(pktE + 4, "00002", 5);
+    pktE[9] = 'O';
+    pktE[10] = 'E';
 
-    lock_guard<mutex> lock1(mapaMutex); // Corrected: use mapaMutex
+    lock_guard<mutex> lock1(mapaMutex);
     lock_guard<mutex> lock2(partidaMutex);
     
     if (!partida.jugadorO.empty() && mapaSockets.count(partida.jugadorO))
@@ -537,7 +482,6 @@ void finalizarPartida(char resultado) {
             write(mapaSockets[esp], pktE, 500);
         }
     }
-    this_thread::sleep_for(chrono::milliseconds(50));
 
     partida = Partida();
     
@@ -551,7 +495,6 @@ void manejarCliente(int sock, const string &nick) {
     char buffer[500];
     vector<string> vc;
     int expected_total_pkgs = 0;
-    int current_message_number = 0; // Para el terminal del server
 
     while (true) {
         int n = read(sock, buffer, 500);
@@ -566,51 +509,45 @@ void manejarCliente(int sock, const string &nick) {
 
         string pkg(buffer, n);
 
-        if (pkg.length() < 10) { // Mínimo 10 para seq y tot (5+5)
-            cerr << "Error: Paquete demasiado corto para cabecera de fragmentacion del cliente " << nick << endl;
+        if (pkg.length() < 4) {
+            cerr << "Error: Paquete demasiado corto para cabecera de fragmentacion." << endl;
             continue;
         }
 
-        int seq = stoi(pkg.substr(0, 5)); // Ahora 5 dígitos
-        int tot = stoi(pkg.substr(5, 5)); // Ahora 5 dígitos
+        int seq = stoi(pkg.substr(0, 2));
+        int tot = stoi(pkg.substr(2, 2));
 
         if (seq < 0 || seq > tot || tot <= 0) {
-            cerr << "Error de fragmento: Valores de secuencia/total invalidos (seq=" << seq << ", tot=" << tot << ") del cliente " << nick << ". Reiniciando reensamblaje." << endl;
+            cerr << "Error de fragmento: Valores de secuencia/total invalidos (seq=" << seq << ", tot=" << tot << ")." << endl;
             vc.clear();
             expected_total_pkgs = 0;
             continue;
         }
 
-        int idx = (seq == 0) ? tot - 1 : seq - 1; // 0 significa el último paquete, su índice es tot-1
+        int idx = (seq == 0) ? tot - 1 : seq - 1;
 
         if (expected_total_pkgs == 0) {
             expected_total_pkgs = tot;
             vc.resize(tot);
-            current_message_number++; // Nuevo mensaje empezando
-            cout << "Recibiendo mensaje #" << current_message_number << " del cliente " << nick << endl;
         } else if (tot != expected_total_pkgs) {
             cerr << "Error de fragmento: El numero total de paquetes cambio (esperado "
-                 << expected_total_pkgs << ", recibido " << tot << ") del cliente " << nick << ". Reiniciando reensamblaje." << endl;
+                 << expected_total_pkgs << ", recibido " << tot << "). Reiniciando reensamblaje." << endl;
             vc.clear();
             expected_total_pkgs = tot;
             vc.resize(tot);
-            current_message_number++; // Considerar como nuevo mensaje
-            cout << "Recibiendo mensaje #" << current_message_number << " del cliente " << nick << endl;
         }
 
         if (idx < 0 || idx >= vc.size()) {
-            cerr << "Error de fragmento: idx fuera de rango o invalido (idx=" << idx << ", vc.size=" << vc.size() << ") del cliente " << nick << "." << endl;
+            cerr << "Error de fragmento: idx fuera de rango o invalido (idx=" << idx << ", vc.size=" << vc.size() << ")." << endl;
             continue;
         }
 
         if (!vc[idx].empty()) {
-            cerr << "Advertencia: Fragmento " << idx + 1 << " ya recibido para mensaje #" << current_message_number << " del cliente " << nick << ". Ignorando duplicado o error." << endl;
+            cerr << "Advertencia: Fragmento " << idx + 1 << " ya recibido. Ignorando duplicado o error." << endl;
             continue;
         }
 
         vc[idx] = move(pkg);
-        cout << "Recibiendo fragmento " << idx + 1 << " de " << expected_total_pkgs << " del mensaje #" << current_message_number << " del cliente " << nick << endl;
-
 
         bool completo = true;
         for (int i = 0; i < expected_total_pkgs; ++i) {
@@ -621,8 +558,7 @@ void manejarCliente(int sock, const string &nick) {
         }
 
         if (completo) {
-            // El tipo de mensaje está en pkg[15] ahora (5+5+5)
-            char tipo = vc[0][15]; 
+            char tipo = vc[0][9];
             vector<string> paquetesCompletos = move(vc);
             vc.clear();
             expected_total_pkgs = 0;
@@ -632,7 +568,7 @@ void manejarCliente(int sock, const string &nick) {
     }
 
     {
-        lock_guard<mutex> lock1(mapaMutex); // Corrected: use mapaMutex
+        lock_guard<mutex> lock1(mapaMutex);
         lock_guard<mutex> lock2(partidaMutex);
         
         if (mapaSockets.count(nick)) {
@@ -711,15 +647,12 @@ int main() {
         }
 
         string pkg(buffer, n);
-        // La validación del paquete de registro N también debe ajustarse a 5 dígitos para seq y tot
-        // y el offset del tipo 'N'.
-        // "0000100001" (seq + tot, 10 caracteres) + "00001" (len, 5 caracteres) + 'N' (1 caracter) = 16
-        if (pkg.length() >= 16 && pkg.substr(0,10) == "0000100001" && pkg[15] == 'N') { // Ajuste a 5 dígitos para seq y tot, y offset para 'N'
-            int tamNick = stoi(pkg.substr(10, 5)) - 1; // Offset ajustado (longitud incluye 'N')
-            if (tamNick > 0 && (size_t)(16 + tamNick) <= pkg.length()) { // Offset ajustado
-                string nick = pkg.substr(16, tamNick); // Offset ajustado
+        if (pkg.length() >= 10 && pkg.substr(0,4) == "0001" && pkg[9] == 'N') {
+            int tamNick = stoi(pkg.substr(4, 5)) - 1;
+            if (tamNick > 0 && (size_t)(10 + tamNick) <= pkg.length()) {
+                string nick = pkg.substr(10, tamNick);
                 
-                lock_guard<mutex> lock(mapaMutex); // Corrected: use mapaMutex
+                lock_guard<mutex> lock(mapaMutex);
                 if (mapaSockets.find(nick) == mapaSockets.end()) {
                     mapaSockets[nick] = client_sock;
                     cout << "Cliente conectado: " << nick << endl;
@@ -730,7 +663,7 @@ int main() {
                     cout << "Cliente rechazado: Nickname '" << nick << "' ya en uso." << endl;
                 }
             } else {
-                cerr << "Error: Paquete de registro N malformado o longitud de nickname invalida." << endl;
+                cerr << "Error: Paquete de registro N malformado." << endl;
                 close(client_sock);
             }
         } else {
